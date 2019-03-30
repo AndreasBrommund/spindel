@@ -9,13 +9,33 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 )
 
-var visited = make(map[string]bool, 0)
+type Visited struct {
+	v   map[string]bool
+	mux sync.Mutex
+}
+
+func (v *Visited) Add(url string) {
+	v.mux.Lock()
+	v.v[url] = true
+	v.mux.Unlock()
+}
+
+func (v *Visited) Exists(url string) bool {
+	v.mux.Lock()
+	defer v.mux.Unlock()
+	return v.v[url]
+}
+
+var visited = Visited{v: make(map[string]bool, 0)}
 
 var baseURL = url.URL{}
 
 const debugLevel = 3
+
+var wg sync.WaitGroup
 
 func main() {
 	//b, _ := url.Parse("http://www.wallstedts.se")
@@ -23,18 +43,23 @@ func main() {
 	b, _ := url.Parse("http://www.aftonbladet.se")
 
 	baseURL = *b
-
 	VisitPage(baseURL)
+
+	wg.Wait()
+	fmt.Println("Done")
 }
 
 func VisitPage(url url.URL) {
 	fmt.Println("Visiting: " + url.String())
-	visited[url.String()] = true
+	visited.Add(url.String())
 	html := DownloadPage(url.String())
 	links := GetLinks(string(html))
-
 	if len(links) > 0 {
-		VisitPages(links)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			VisitPages(links)
+		}()
 	}
 }
 
@@ -53,13 +78,20 @@ func DownloadPage(url string) string {
 
 	if err != nil {
 		debug("Could not get page: "+url+" ("+err.Error()+")", 2)
+		return ""
 	}
 
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		debug("Could not get page "+url+" ("+strconv.Itoa(resp.StatusCode)+")", 2)
+		return ""
+	}
 	html, err := ioutil.ReadAll(resp.Body)
 
 	if err != nil {
 		debug("Could not read response body ("+err.Error()+")", 2)
+		return ""
 	}
 
 	return string(html)
@@ -86,7 +118,7 @@ func GetLinks(content string) []url.URL {
 
 func shouldVisit(url url.URL) bool {
 
-	if visited[url.String()] {
+	if visited.Exists(url.String()) {
 		debug(url.String()+" already visited", 4)
 		return false
 	}

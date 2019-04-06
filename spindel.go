@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Visited struct {
@@ -17,16 +18,14 @@ type Visited struct {
 	mux sync.Mutex
 }
 
-func (v *Visited) Add(url string) {
-	v.mux.Lock()
-	v.v[url] = true
-	v.mux.Unlock()
-}
-
-func (v *Visited) Exists(url string) bool {
+func (v *Visited) Visit(url string) bool {
 	v.mux.Lock()
 	defer v.mux.Unlock()
-	return v.v[url]
+
+	isVisited := v.v[url]
+	v.v[url] = true
+
+	return isVisited
 }
 
 var visited = Visited{v: make(map[string]bool, 0)}
@@ -43,55 +42,99 @@ func main() {
 	b, _ := url.Parse("http://www.aftonbladet.se")
 
 	baseURL = *b
-	VisitPage(baseURL)
+
+	start := time.Now()
+
+	fetchingWorkers := 10
+	parsingWorkers := 10
+	buffer := 1000000 //TODO is it possible to prevent "deadlock" if the buffer is too small?
+
+	var waitGroupFetching sync.WaitGroup
+	waitGroupFetching.Add(fetchingWorkers)
+
+	var waitGroupParsing sync.WaitGroup
+	waitGroupParsing.Add(parsingWorkers)
+
+	fetchChannel := make(chan url.URL, buffer)
+	parseChannel := make(chan string, buffer)
+
+	wg.Add(1)
+	fetchChannel <- baseURL
+
+	for w := 1; w <= fetchingWorkers; w++ {
+		go func(id int) {
+			defer waitGroupFetching.Done()
+			fetch(id, fetchChannel, parseChannel)
+		}(w)
+	}
+
+	for w := 1; w <= parsingWorkers; w++ {
+		go func(id int) {
+			defer waitGroupParsing.Done()
+			parse(id, fetchChannel, parseChannel)
+		}(w)
+	}
 
 	wg.Wait()
+	close(fetchChannel)
+	close(parseChannel)
+	waitGroupFetching.Wait()
+	waitGroupParsing.Wait()
 	fmt.Println("Done")
+	fmt.Println(time.Since(start))
+
 }
 
-func VisitPage(url url.URL) {
-	fmt.Println("Visiting: " + url.String())
-	visited.Add(url.String())
-	html := DownloadPage(url.String())
-	links := GetLinks(string(html))
-	if len(links) > 0 {
+func fetch(id int, fetchChannel <-chan url.URL, parseChannel chan<- string) {
+	for u := range fetchChannel {
+		debug(strconv.Itoa(id)+" is working on "+u.String(), 4)
+		fmt.Println("Visiting: ", u.String())
 		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			VisitPages(links)
-		}()
+		parseChannel <- DownloadPage(u.String())
+		wg.Done()
 	}
+	debug("Done "+strconv.Itoa(id), 4)
 }
 
-func VisitPages(urls []url.URL) {
-	for _, u := range urls {
-		debug(fmt.Sprintf("%s = %v", u.String(), shouldVisit(u)), 5)
-		if shouldVisit(u) {
-			VisitPage(u)
+func parse(id int, fetchChannel chan<- url.URL, parseChannel <-chan string) {
+	for html := range parseChannel {
+		debug(strconv.Itoa(id)+" is working", 4)
+		urls := GetLinks(string(html))
+		for _, u := range urls {
+			if shouldVisit(u) {
+				wg.Add(1)
+				fetchChannel <- u
+			}
 		}
+		wg.Done()
 	}
+	debug("Done "+strconv.Itoa(id), 4)
 }
 
 func DownloadPage(url string) string {
+	//TODO Better error handeling  die in a good way
 
-	resp, err := http.Get(url)
+	var err error
+	var resp *http.Response
 
-	if err != nil {
-		debug("Could not get page: "+url+" ("+err.Error()+")", 2)
-		return ""
+	for i := 0; i < 10; i++ {
+		resp, err = http.Get(url)
+		if err != nil {
+			debug("Could not get page: "+url+" ("+err.Error()+")", 2)
+			return ""
+		} else {
+			defer resp.Body.Close()
+			break
+		}
 	}
-
-	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		debug("Could not get page "+url+" ("+strconv.Itoa(resp.StatusCode)+")", 2)
-		return ""
 	}
 	html, err := ioutil.ReadAll(resp.Body)
 
 	if err != nil {
 		debug("Could not read response body ("+err.Error()+")", 2)
-		return ""
 	}
 
 	return string(html)
@@ -118,7 +161,7 @@ func GetLinks(content string) []url.URL {
 
 func shouldVisit(url url.URL) bool {
 
-	if visited.Exists(url.String()) {
+	if visited.Visit(url.String()) {
 		debug(url.String()+" already visited", 4)
 		return false
 	}
@@ -139,7 +182,7 @@ func shouldVisit(url url.URL) bool {
 	}
 
 	if url.Host != baseURL.Host {
-		debug(url.String()+" only visit links at from base url host ("+url.Host+")", 4)
+		debug(url.String()+" only visit links from base url host ("+url.Host+")", 4)
 		return false
 	}
 
@@ -156,6 +199,6 @@ func debug(msg string, level int) {
 	 */
 
 	if debugLevel >= level {
-		log.Println(msg + " (" + strconv.Itoa(level) + ")")
+		log.Println(msg, " (", level, ")")
 	}
 }

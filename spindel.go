@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -11,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/andreasbrommund/spindel/logging"
 )
 
 type Visited struct {
@@ -35,6 +36,7 @@ var baseURL = url.URL{}
 const debugLevel = 3
 
 var wg sync.WaitGroup
+var log *logging.Logging
 
 func main() {
 	//b, _ := url.Parse("http://www.wallstedts.se")
@@ -45,8 +47,8 @@ func main() {
 
 	start := time.Now()
 
-	fetchingWorkers := 10
-	parsingWorkers := 10
+	fetchingWorkers := 1000
+	parsingWorkers := 100000
 	buffer := 1000000 //TODO is it possible to prevent "deadlock" if the buffer is too small?
 
 	var waitGroupFetching sync.WaitGroup
@@ -57,6 +59,8 @@ func main() {
 
 	fetchChannel := make(chan url.URL, buffer)
 	parseChannel := make(chan string, buffer)
+
+	log = logging.NewLogger(logging.WARNING, "err.log")
 
 	wg.Add(1)
 	fetchChannel <- baseURL
@@ -87,18 +91,18 @@ func main() {
 
 func fetch(id int, fetchChannel <-chan url.URL, parseChannel chan<- string) {
 	for u := range fetchChannel {
-		debug(strconv.Itoa(id)+" is working on "+u.String(), 4)
+		log.LogDebug(strconv.Itoa(id) + " is working on " + u.String())
 		fmt.Println("Visiting: ", u.String())
 		wg.Add(1)
 		parseChannel <- DownloadPage(u.String())
 		wg.Done()
 	}
-	debug("Done "+strconv.Itoa(id), 4)
+	log.LogDebug("Done " + strconv.Itoa(id))
 }
 
 func parse(id int, fetchChannel chan<- url.URL, parseChannel <-chan string) {
 	for html := range parseChannel {
-		debug(strconv.Itoa(id)+" is working", 4)
+		log.LogDebug(strconv.Itoa(id) + " is working")
 		urls := GetLinks(string(html))
 		for _, u := range urls {
 			if shouldVisit(u) {
@@ -108,7 +112,7 @@ func parse(id int, fetchChannel chan<- url.URL, parseChannel <-chan string) {
 		}
 		wg.Done()
 	}
-	debug("Done "+strconv.Itoa(id), 4)
+	log.LogDebug("Done " + strconv.Itoa(id))
 }
 
 func DownloadPage(url string) string {
@@ -120,21 +124,24 @@ func DownloadPage(url string) string {
 	for i := 0; i < 10; i++ {
 		resp, err = http.Get(url)
 		if err != nil {
-			debug("Could not get page: "+url+" ("+err.Error()+")", 2)
-			return ""
+			log.LogWarning("Could not get page: "+url, err)
 		} else {
 			defer resp.Body.Close()
 			break
 		}
 	}
 
+	if err != nil {
+		log.LogError("Faild to get page", err)
+	}
+
 	if resp.StatusCode != http.StatusOK {
-		debug("Could not get page "+url+" ("+strconv.Itoa(resp.StatusCode)+")", 2)
+		log.LogError("Could not get page "+url+" ("+strconv.Itoa(resp.StatusCode)+")", nil)
 	}
 	html, err := ioutil.ReadAll(resp.Body)
 
 	if err != nil {
-		debug("Could not read response body ("+err.Error()+")", 2)
+		log.LogError("Could not read response body", err)
 	}
 
 	return string(html)
@@ -152,7 +159,7 @@ func GetLinks(content string) []url.URL {
 			}
 			urls = append(urls, *url)
 		} else {
-			debug("Could not parse: "+link[1]+" ("+err.Error()+")", 2)
+			log.LogError("Could not parse: "+link[1], err)
 		}
 	}
 
@@ -162,7 +169,7 @@ func GetLinks(content string) []url.URL {
 func shouldVisit(url url.URL) bool {
 
 	if visited.Visit(url.String()) {
-		debug(url.String()+" already visited", 4)
+		log.LogInfo(url.String() + " already visited")
 		return false
 	}
 
@@ -170,35 +177,21 @@ func shouldVisit(url url.URL) bool {
 		if strings.Contains(url.Path, ".") {
 			reg := regexp.MustCompile(`(?mi).*(html|css|js|php)$`) //TOOD improve
 			if !reg.MatchString(url.Path) {
-				debug(url.String()+" do not match regex ("+url.Path+")", 4)
+				log.LogInfo(url.String() + " do not match regex (" + url.Path + ")")
 				return false
 			}
 		}
 	}
 
 	if !(url.Scheme == "http" || url.Scheme == "https") {
-		debug(url.String()+" not https or http ("+url.Scheme+")", 4)
+		log.LogInfo(url.String() + " not https or http (" + url.Scheme + ")")
 		return false
 	}
 
 	if url.Host != baseURL.Host {
-		debug(url.String()+" only visit links from base url host ("+url.Host+")", 4)
+		log.LogInfo(url.String() + " only visit links from base url host (" + url.Host + ")")
 		return false
 	}
 
 	return true
-}
-
-func debug(msg string, level int) {
-	/*
-	* 1 FATAL
-	* 2 ERROR
-	* 3 WARN
-	* 4 INFO
-	* 5 DEBUG
-	 */
-
-	if debugLevel >= level {
-		log.Println(msg, " (", level, ")")
-	}
 }
